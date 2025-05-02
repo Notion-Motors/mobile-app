@@ -1,0 +1,210 @@
+// types/tripPlanning.ts
+interface ChargingStation {
+  id: string;
+  location: {
+    latitude: number;
+    longitude: number;
+  };
+  name: string;
+  availability: boolean;
+  chargingSpeed: number; // kW
+  pricePerKWh: number;
+  amenities: string[];
+}
+
+interface RouteSegment {
+  distance: number;
+  duration: number;
+  energyConsumption: number;
+  startLocation: [number, number];
+  endLocation: [number, number];
+  polyline: string;
+}
+
+interface TripPlan {
+  totalDistance: number;
+  totalDuration: number;
+  totalEnergyConsumption: number;
+  chargingStops: ChargingStation[];
+  segments: RouteSegment[];
+  estimatedCost: number;
+}
+
+// services/tripPlanner.ts
+class TripPlanningService {
+  private baseUrl = 'https://api.notionmotors.com/v1/navigation';
+  private vehicle: VehicleConfig;
+
+  constructor(vehicleConfig: VehicleConfig) {
+    this.vehicle = vehicleConfig;
+  }
+
+  private async calculateEnergyConsumption(
+    route: RouteSegment,
+    weather: WeatherData,
+    traffic: TrafficData
+  ): Promise<number> {
+    const baseConsumption = this.vehicle.baseConsumptionRate;
+    const elevation = await this.getElevationProfile(route);
+    
+    // Factor in various parameters affecting energy consumption
+    const weatherFactor = this.calculateWeatherImpact(weather);
+    const trafficFactor = this.calculateTrafficImpact(traffic);
+    const elevationFactor = this.calculateElevationImpact(elevation);
+    
+    return baseConsumption * weatherFactor * trafficFactor * elevationFactor * route.distance;
+  }
+
+  public async planTrip(
+    start: [number, number],
+    end: [number, number],
+    preferences: TripPreferences
+  ): Promise<TripPlan> {
+    const currentCharge = await this.vehicle.getCurrentBatteryLevel();
+    const range = this.vehicle.getEstimatedRange(currentCharge);
+    
+    // Get multiple route options
+    const routes = await this.fetchRouteOptions(start, end);
+    
+    // Calculate energy requirements for each route
+    const routesWithEnergy = await Promise.all(
+      routes.map(async route => {
+        const weather = await this.getWeatherData(route);
+        const traffic = await this.getTrafficData(route);
+        const energyConsumption = await this.calculateEnergyConsumption(route, weather, traffic);
+        return { ...route, energyConsumption };
+      })
+    );
+
+    // Find optimal charging stops
+    const chargingStops = await this.findOptimalChargingStops(
+      routesWithEnergy,
+      range,
+      preferences
+    );
+
+    return this.constructTripPlan(routesWithEnergy, chargingStops);
+  }
+
+  private async findOptimalChargingStops(
+    routes: RouteSegment[],
+    range: number,
+    preferences: TripPreferences
+  ): Promise<ChargingStation[]> {
+    const stops: ChargingStation[] = [];
+    let remainingRange = range;
+
+    for (const segment of routes) {
+      if (segment.energyConsumption > remainingRange) {
+        const stations = await this.fetchNearbyChargingStations(segment.startLocation);
+        const optimalStation = this.selectOptimalChargingStation(
+          stations,
+          preferences,
+          remainingRange
+        );
+        stops.push(optimalStation);
+        remainingRange = this.vehicle.getEstimatedRange(100); // Assume full charge
+      }
+      remainingRange -= segment.energyConsumption;
+    }
+
+    return stops;
+  }
+
+  private selectOptimalChargingStation(
+    stations: ChargingStation[],
+    preferences: TripPreferences,
+    remainingRange: number
+  ): ChargingStation {
+    return stations
+      .filter(station => this.isStationReachable(station, remainingRange))
+      .sort((a, b) => {
+        const scoreA = this.calculateStationScore(a, preferences);
+        const scoreB = this.calculateStationScore(b, preferences);
+        return scoreB - scoreA;
+      })[0];
+  }
+
+  private calculateStationScore(
+    station: ChargingStation,
+    preferences: TripPreferences
+  ): number {
+    const {
+      prioritizeCost,
+      prioritizeSpeed,
+      preferredAmenities
+    } = preferences;
+
+    let score = 0;
+    
+    // Cost score
+    score += prioritizeCost ? (1 / station.pricePerKWh) * 100 : 0;
+    
+    // Charging speed score
+    score += prioritizeSpeed ? station.chargingSpeed : 0;
+    
+    // Amenities score
+    const amenitiesScore = preferredAmenities.reduce((acc, amenity) => 
+      acc + (station.amenities.includes(amenity) ? 20 : 0), 0);
+    score += amenitiesScore;
+
+    return score;
+  }
+}
+
+// components/TripPlanner.tsx
+const TripPlanner: React.FC = () => {
+  const [origin, setOrigin] = useState<[number, number]>([0, 0]);
+  const [destination, setDestination] = useState<[number, number]>([0, 0]);
+  const [tripPlan, setTripPlan] = useState<TripPlan | null>(null);
+  const [preferences, setPreferences] = useState<TripPreferences>({
+    prioritizeCost: true,
+    prioritizeSpeed: false,
+    preferredAmenities: ['restroom', 'food', 'wifi']
+  });
+
+  const planningService = new TripPlanningService(vehicleConfig);
+
+  const handlePlanTrip = async () => {
+    try {
+      const plan = await planningService.planTrip(
+        origin,
+        destination,
+        preferences
+      );
+      setTripPlan(plan);
+    } catch (error) {
+      Alert.alert('Error', 'Failed to generate trip plan');
+    }
+  };
+
+  return (
+    <View style={styles.container}>
+      <LocationPicker
+        value={origin}
+        onChange={setOrigin}
+        placeholder="Select starting point"
+      />
+      <LocationPicker
+        value={destination}
+        onChange={setDestination}
+        placeholder="Select destination"
+      />
+      <PreferencesPanel
+        preferences={preferences}
+        onChange={setPreferences}
+      />
+      <Button
+        title="Plan Trip"
+        onPress={handlePlanTrip}
+        disabled={!origin || !destination}
+      />
+      {tripPlan && (
+        <TripSummary
+          plan={tripPlan}
+          onStopPress={handleStopPress}
+        />
+      )}
+    </View>
+  );
+};
