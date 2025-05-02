@@ -1,0 +1,294 @@
+// types/vehicleControl.ts
+interface VehicleControlState {
+  isRunning: boolean;
+  isLocked: boolean;
+  climate: {
+    temperature: number;
+    isOn: boolean;
+    mode: 'heat' | 'cool' | 'off';
+    fanSpeed: 1 | 2 | 3 | 4;
+  };
+  lastUpdateTime: Date;
+}
+
+// services/vehicleControl.ts
+import { createHmac } from 'crypto';
+import { SecureStore } from 'expo-secure-store';
+
+class VehicleControlService {
+  private baseUrl = 'https://api.notionmotors.com/v1/control';
+  private vehicleId: string;
+
+  constructor(vehicleId: string) {
+    this.vehicleId = vehicleId;
+  }
+
+  private async getAuthHeader(): Promise<string> {
+    const apiKey = await SecureStore.getItemAsync('vehicle_api_key');
+    const timestamp = Date.now().toString();
+    const signature = createHmac('sha256', apiKey)
+      .update(`${this.vehicleId}:${timestamp}`)
+      .digest('hex');
+    
+    return `Bearer ${signature}:${timestamp}`;
+  }
+
+  private async sendCommand(endpoint: string, data: any): Promise<Response> {
+    const headers = {
+      'Authorization': await this.getAuthHeader(),
+      'Content-Type': 'application/json',
+    };
+
+    return fetch(`${this.baseUrl}/${endpoint}`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ vehicleId: this.vehicleId, ...data }),
+    });
+  }
+
+  public async startEngine(): Promise<boolean> {
+    try {
+      const response = await this.sendCommand('engine/start', {
+        timestamp: new Date().toISOString(),
+      });
+      return response.ok;
+    } catch (error) {
+      console.error('Engine start failed:', error);
+      return false;
+    }
+  }
+
+  public async stopEngine(): Promise<boolean> {
+    try {
+      const response = await this.sendCommand('engine/stop', {
+        timestamp: new Date().toISOString(),
+      });
+      return response.ok;
+    } catch (error) {
+      console.error('Engine stop failed:', error);
+      return false;
+    }
+  }
+
+  public async setClimate(settings: Partial<VehicleControlState['climate']>): Promise<boolean> {
+    try {
+      const response = await this.sendCommand('climate/set', {
+        settings,
+        timestamp: new Date().toISOString(),
+      });
+      return response.ok;
+    } catch (error) {
+      console.error('Climate control failed:', error);
+      return false;
+    }
+  }
+
+  public async toggleLock(lock: boolean): Promise<boolean> {
+    try {
+      const response = await this.sendCommand('doors/control', {
+        action: lock ? 'lock' : 'unlock',
+        timestamp: new Date().toISOString(),
+      });
+      return response.ok;
+    } catch (error) {
+      console.error('Door control failed:', error);
+      return false;
+    }
+  }
+}
+
+// components/RemoteControl.tsx
+import React, { useState, useEffect } from 'react';
+import { View, StyleSheet, TouchableOpacity, Text, Alert } from 'react-native';
+import { VehicleControlService } from '../services/vehicleControl';
+import { Slider } from '@react-native-community/slider';
+import Icon from 'react-native-vector-icons/MaterialCommunityIcons';
+
+const RemoteControl: React.FC = () => {
+  const [controlState, setControlState] = useState<VehicleControlState>({
+    isRunning: false,
+    isLocked: true,
+    climate: {
+      temperature: 22,
+      isOn: false,
+      mode: 'off',
+      fanSpeed: 1,
+    },
+    lastUpdateTime: new Date(),
+  });
+
+  const controlService = new VehicleControlService('VEHICLE_ID');
+
+  const handleEngineToggle = async () => {
+    try {
+      const success = controlState.isRunning 
+        ? await controlService.stopEngine()
+        : await controlService.startEngine();
+
+      if (success) {
+        setControlState(prev => ({
+          ...prev,
+          isRunning: !prev.isRunning,
+          lastUpdateTime: new Date(),
+        }));
+      } else {
+        Alert.alert('Error', 'Failed to control engine');
+      }
+    } catch (error) {
+      Alert.alert('Error', 'Failed to communicate with vehicle');
+    }
+  };
+
+  const handleClimateControl = async (settings: Partial<VehicleControlState['climate']>) => {
+    try {
+      const success = await controlService.setClimate(settings);
+      if (success) {
+        setControlState(prev => ({
+          ...prev,
+          climate: { ...prev.climate, ...settings },
+          lastUpdateTime: new Date(),
+        }));
+      } else {
+        Alert.alert('Error', 'Failed to control climate');
+      }
+    } catch (error) {
+      Alert.alert('Error', 'Failed to communicate with vehicle');
+    }
+  };
+
+  const handleLockToggle = async () => {
+    try {
+      const success = await controlService.toggleLock(!controlState.isLocked);
+      if (success) {
+        setControlState(prev => ({
+          ...prev,
+          isLocked: !prev.isLocked,
+          lastUpdateTime: new Date(),
+        }));
+      } else {
+        Alert.alert('Error', 'Failed to control locks');
+      }
+    } catch (error) {
+      Alert.alert('Error', 'Failed to communicate with vehicle');
+    }
+  };
+
+  return (
+    <View style={styles.container}>
+      <View style={styles.controlGrid}>
+        <TouchableOpacity 
+          style={[styles.controlButton, controlState.isRunning && styles.activeButton]}
+          onPress={handleEngineToggle}
+        >
+          <Icon 
+            name="power" 
+            size={32} 
+            color={controlState.isRunning ? '#fff' : '#000'} 
+          />
+          <Text style={styles.buttonText}>
+            {controlState.isRunning ? 'Stop Engine' : 'Start Engine'}
+          </Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity 
+          style={[styles.controlButton, !controlState.isLocked && styles.activeButton]}
+          onPress={handleLockToggle}
+        >
+          <Icon 
+            name={controlState.isLocked ? 'lock' : 'lock-open'} 
+            size={32} 
+            color={controlState.isLocked ? '#000' : '#fff'} 
+          />
+          <Text style={styles.buttonText}>
+            {controlState.isLocked ? 'Unlock' : 'Lock'}
+          </Text>
+        </TouchableOpacity>
+
+        <View style={styles.climateControl}>
+          <Text style={styles.temperatureText}>
+            {controlState.climate.temperature}°C
+          </Text>
+          <Slider
+            style={styles.slider}
+            minimumValue={16}
+            maximumValue={30}
+            step={0.5}
+            value={controlState.climate.temperature}
+            onValueChange={(value) => handleClimateControl({ temperature: value })}
+          />
+          <View style={styles.fanControls}>
+            {[1, 2, 3, 4].map((speed) => (
+              <TouchableOpacity
+                key={speed}
+                style={[
+                  styles.fanButton,
+                  controlState.climate.fanSpeed === speed && styles.activeFanButton
+                ]}
+                onPress={() => handleClimateControl({ fanSpeed: speed as 1|2|3|4 })}
+              >
+                <Text style={styles.fanButtonText}>{speed}</Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+        </View>
+      </View>
+    </View>
+  );
+};
+
+const styles = StyleSheet.create({
+  container: {
+    padding: 20,
+  },
+  controlGrid: {
+    gap: 20,
+  },
+  controlButton: {
+    backgroundColor: '#f0f0f0',
+    padding: 20,
+    borderRadius: 10,
+    alignItems: 'center',
+    flexDirection: 'row',
+    justifyContent: 'center',
+    gap: 10,
+  },
+  activeButton: {
+    backgroundColor: '#4CAF50',
+  },
+  buttonText: {
+    fontSize: 18,
+    fontWeight: '500',
+  },
+  climateControl: {
+    backgroundColor: '#f0f0f0',
+    padding: 20,
+    borderRadius: 10,
+  },
+  temperatureText: {
+    fontSize: 24,
+    textAlign: 'center',
+    fontWeight: 'bold',
+  },
+  slider: {
+    marginVertical: 10,
+  },
+  fanControls: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginTop: 10,
+  },
+  fanButton: {
+    backgroundColor: '#ddd',
+    padding: 10,
+    borderRadius: 5,
+    flex: 1,
+    marginHorizontal: 5,
+  },
+  activeFanButton: {
+    backgroundColor: '#4CAF50',
+  },
+  fanButtonText: {
+    textAlign: 'center',
+    color: '#000',
+  },
+});
