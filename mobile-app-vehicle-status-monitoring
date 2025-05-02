@@ -1,0 +1,172 @@
+// types/vehicle.ts
+interface VehicleStatus {
+  batteryLevel: number;
+  range: number;
+  chargingStatus: 'charging' | 'not_charging' | 'complete';
+  timestamp: Date;
+  location?: {
+    latitude: number;
+    longitude: number;
+  };
+}
+
+// services/vehicleMonitoring.ts
+import firestore from '@react-native-firebase/firestore';
+import { BehaviorSubject } from 'rxjs';
+
+export class VehicleMonitoringService {
+  private statusSubject = new BehaviorSubject<VehicleStatus | null>(null);
+  private vehicleRef: firebase.firestore.DocumentReference;
+
+  constructor(vehicleId: string) {
+    this.vehicleRef = firestore().collection('vehicles').doc(vehicleId);
+    this.startMonitoring();
+  }
+
+  private startMonitoring() {
+    // Real-time updates subscription
+    this.vehicleRef.onSnapshot((snapshot) => {
+      const data = snapshot.data() as VehicleStatus;
+      this.statusSubject.next(data);
+    });
+  }
+
+  public getStatus$() {
+    return this.statusSubject.asObservable();
+  }
+
+  public async updateStatus(status: Partial<VehicleStatus>) {
+    try {
+      await this.vehicleRef.update({
+        ...status,
+        timestamp: new Date()
+      });
+    } catch (error) {
+      throw new Error(`Failed to update vehicle status: ${error.message}`);
+    }
+  }
+
+  // Range estimation algorithm
+  public estimateRange(batteryLevel: number, avgConsumption: number): number {
+    const BATTERY_CAPACITY = 75; // kWh
+    const SAFETY_FACTOR = 0.9; // 90% of theoretical range
+    
+    return (batteryLevel / 100) * BATTERY_CAPACITY * avgConsumption * SAFETY_FACTOR;
+  }
+}
+
+// components/VehicleStatusMonitor.tsx
+import React, { useEffect, useState } from 'react';
+import { View, Text, StyleSheet } from 'react-native';
+import { VehicleMonitoringService } from '../services/vehicleMonitoring';
+import { AnimatedCircularProgress } from 'react-native-circular-progress';
+
+interface Props {
+  vehicleId: string;
+}
+
+const VehicleStatusMonitor: React.FC<Props> = ({ vehicleId }) => {
+  const [status, setStatus] = useState<VehicleStatus | null>(null);
+  const monitoringService = new VehicleMonitoringService(vehicleId);
+
+  useEffect(() => {
+    const subscription = monitoringService.getStatus$().subscribe(
+      (newStatus) => setStatus(newStatus)
+    );
+
+    return () => subscription.unsubscribe();
+  }, []);
+
+  const getChargingStatusColor = (status: string) => {
+    switch (status) {
+      case 'charging': return '#4CAF50';
+      case 'complete': return '#2196F3';
+      default: return '#757575';
+    }
+  };
+
+  if (!status) {
+    return <Text>Loading vehicle status...</Text>;
+  }
+
+  return (
+    <View style={styles.container}>
+      {/* Battery Level Indicator */}
+      <AnimatedCircularProgress
+        size={200}
+        width={15}
+        fill={status.batteryLevel}
+        tintColor="#4CAF50"
+        backgroundColor="#3d5875">
+        {(fill) => (
+          <View style={styles.batteryInfo}>
+            <Text style={styles.batteryPercentage}>{fill.toFixed(1)}%</Text>
+            <Text style={styles.batteryLabel}>Battery Level</Text>
+          </View>
+        )}
+      </AnimatedCircularProgress>
+
+      {/* Range Estimation */}
+      <View style={styles.rangeContainer}>
+        <Text style={styles.rangeValue}>{status.range.toFixed(1)} km</Text>
+        <Text style={styles.rangeLabel}>Estimated Range</Text>
+      </View>
+
+      {/* Charging Status */}
+      <View style={styles.chargingStatus}>
+        <View style={[
+          styles.statusIndicator,
+          { backgroundColor: getChargingStatusColor(status.chargingStatus) }
+        ]} />
+        <Text style={styles.statusText}>
+          {status.chargingStatus.replace('_', ' ').toUpperCase()}
+        </Text>
+      </View>
+    </View>
+  );
+};
+
+const styles = StyleSheet.create({
+  container: {
+    padding: 20,
+    alignItems: 'center',
+  },
+  batteryInfo: {
+    alignItems: 'center',
+  },
+  batteryPercentage: {
+    fontSize: 24,
+    fontWeight: 'bold',
+  },
+  batteryLabel: {
+    fontSize: 16,
+    color: '#666',
+  },
+  rangeContainer: {
+    marginTop: 20,
+    alignItems: 'center',
+  },
+  rangeValue: {
+    fontSize: 28,
+    fontWeight: 'bold',
+  },
+  rangeLabel: {
+    fontSize: 16,
+    color: '#666',
+  },
+  chargingStatus: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 20,
+  },
+  statusIndicator: {
+    width: 12,
+    height: 12,
+    borderRadius: 6,
+    marginRight: 8,
+  },
+  statusText: {
+    fontSize: 16,
+    fontWeight: '500',
+  },
+});
