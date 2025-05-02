@@ -1,0 +1,183 @@
+// types/profile.ts
+interface UserProfile {
+  id: string;
+  displayName: string;
+  email: string;
+  phoneNumber?: string;
+  vehicles: Vehicle[];
+  preferences: UserPreferences;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+interface UserPreferences {
+  notifications: boolean;
+  measurementUnit: 'metric' | 'imperial';
+  language: string;
+}
+
+// services/profile.ts
+import firestore from '@react-native-firebase/firestore';
+import storage from '@react-native-firebase/storage';
+
+export class ProfileService {
+  private profilesCollection = firestore().collection('profiles');
+
+  async getProfile(userId: string): Promise<UserProfile> {
+    try {
+      const doc = await this.profilesCollection.doc(userId).get();
+      return doc.data() as UserProfile;
+    } catch (error) {
+      throw new Error(`Failed to fetch profile: ${error.message}`);
+    }
+  }
+
+  async updateProfile(userId: string, data: Partial<UserProfile>): Promise<void> {
+    try {
+      await this.profilesCollection.doc(userId).update({
+        ...data,
+        updatedAt: new Date()
+      });
+    } catch (error) {
+      throw new Error(`Failed to update profile: ${error.message}`);
+    }
+  }
+
+  async uploadProfileImage(userId: string, imageUri: string): Promise<string> {
+    try {
+      const reference = storage().ref(`profileImages/${userId}`);
+      await reference.putFile(imageUri);
+      return await reference.getDownloadURL();
+    } catch (error) {
+      throw new Error(`Failed to upload image: ${error.message}`);
+    }
+  }
+}
+
+// components/ProfileScreen.tsx
+import React, { useState, useEffect } from 'react';
+import { View, TextInput, Button, Image, StyleSheet } from 'react-native';
+import { ProfileService } from '../services/profile';
+import { useAuth } from '../hooks/useAuth';
+import ImagePicker from 'react-native-image-picker';
+
+const ProfileScreen: React.FC = () => {
+  const { user } = useAuth();
+  const [profile, setProfile] = useState<UserProfile | null>(null);
+  const [loading, setLoading] = useState(true);
+  const profileService = new ProfileService();
+
+  useEffect(() => {
+    loadProfile();
+  }, []);
+
+  const loadProfile = async () => {
+    try {
+      const data = await profileService.getProfile(user.uid);
+      setProfile(data);
+    } catch (error) {
+      console.error(error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleUpdateProfile = async (updates: Partial<UserProfile>) => {
+    try {
+      await profileService.updateProfile(user.uid, updates);
+      await loadProfile();
+    } catch (error) {
+      console.error(error);
+    }
+  };
+
+  const handleImagePick = async () => {
+    ImagePicker.launchImageLibrary({
+      mediaType: 'photo',
+      quality: 0.8,
+    }, async (response) => {
+      if (response.uri) {
+        try {
+          const imageUrl = await profileService.uploadProfileImage(
+            user.uid,
+            response.uri
+          );
+          await handleUpdateProfile({ profileImageUrl: imageUrl });
+        } catch (error) {
+          console.error(error);
+        }
+      }
+    });
+  };
+
+  if (loading) {
+    return <LoadingSpinner />;
+  }
+
+  return (
+    <View style={styles.container}>
+      <Image
+        source={{ uri: profile?.profileImageUrl }}
+        style={styles.profileImage}
+      />
+      <Button title="Change Photo" onPress={handleImagePick} />
+      
+      <TextInput
+        value={profile?.displayName}
+        onChangeText={(text) => 
+          handleUpdateProfile({ displayName: text })
+        }
+        placeholder="Display Name"
+        style={styles.input}
+      />
+      
+      <TextInput
+        value={profile?.phoneNumber}
+        onChangeText={(text) => 
+          handleUpdateProfile({ phoneNumber: text })
+        }
+        placeholder="Phone Number"
+        style={styles.input}
+      />
+
+      {/* Preferences Section */}
+      <View style={styles.preferencesSection}>
+        <Switch
+          value={profile?.preferences.notifications}
+          onValueChange={(value) =>
+            handleUpdateProfile({
+              preferences: { ...profile?.preferences, notifications: value }
+            })
+          }
+        />
+        <Text>Enable Notifications</Text>
+      </View>
+    </View>
+  );
+};
+
+const styles = StyleSheet.create({
+  container: {
+    flex: 1,
+    padding: 16,
+  },
+  profileImage: {
+    width: 150,
+    height: 150,
+    borderRadius: 75,
+    alignSelf: 'center',
+    marginBottom: 16,
+  },
+  input: {
+    borderWidth: 1,
+    borderColor: '#ddd',
+    padding: 8,
+    marginVertical: 8,
+    borderRadius: 4,
+  },
+  preferencesSection: {
+    marginTop: 16,
+  },
+});
+
+export default ProfileScreen;
