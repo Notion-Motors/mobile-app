@@ -1,0 +1,124 @@
+import React, { createContext, useContext, useMemo, useCallback, useEffect, useState } from 'react';
+import { useColorScheme } from 'react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { PerformanceMonitor } from './utils/PerformanceMonitor';
+
+type ThemeMode = 'light' | 'dark' | 'auto';
+
+interface ThemeContextType {
+  mode: ThemeMode;
+  isDark: boolean;
+  colors: ThemeColors;
+  setTheme: (mode: ThemeMode) => void;
+}
+
+interface ThemeColors {
+  background: string;
+  surface: string;
+  primary: string;
+  text: string;
+  textSecondary: string;
+  border: string;
+  // ... other colors
+}
+
+const THEME_STORAGE_KEY = '@app_theme_preference';
+
+// Precomputed theme colors - cached to avoid recalculation
+const lightTheme: ThemeColors = {
+  background: '#FFFFFF',
+  surface: '#F5F5F5',
+  primary: '#007AFF',
+  text: '#000000',
+  textSecondary: '#666666',
+  border: '#E0E0E0',
+};
+
+const darkTheme: ThemeColors = {
+  background: '#000000',
+  surface: '#1C1C1E',
+  primary: '#0A84FF',
+  text: '#FFFFFF',
+  textSecondary: '#999999',
+  border: '#38383A',
+};
+
+const ThemeContext = createContext<ThemeContextType | undefined>(undefined);
+
+export const ThemeProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  const systemColorScheme = useColorScheme();
+  const [mode, setMode] = useState<ThemeMode>('auto');
+  const [isReady, setIsReady] = useState(false);
+
+  // Load saved theme preference
+  useEffect(() => {
+    const loadTheme = async () => {
+      try {
+        const saved = await AsyncStorage.getItem(THEME_STORAGE_KEY);
+        if (saved) {
+          setMode(saved as ThemeMode);
+        }
+      } catch (error) {
+        console.error('Failed to load theme preference:', error);
+      } finally {
+        setIsReady(true);
+      }
+    };
+    loadTheme();
+  }, []);
+
+  // Determine if dark mode is active
+  const isDark = useMemo(() => {
+    if (mode === 'auto') {
+      return systemColorScheme === 'dark';
+    }
+    return mode === 'dark';
+  }, [mode, systemColorScheme]);
+
+  // Memoized colors object - prevents unnecessary re-renders
+  const colors = useMemo(() => {
+    return isDark ? darkTheme : lightTheme;
+  }, [isDark]);
+
+  // Batched theme update with performance tracking
+  const setTheme = useCallback(async (newMode: ThemeMode) => {
+    const perfMark = PerformanceMonitor.startMark('theme_switch');
+    
+    // Use requestAnimationFrame for smooth transition
+    requestAnimationFrame(() => {
+      setMode(newMode);
+      PerformanceMonitor.endMark(perfMark);
+    });
+
+    // Save preference asynchronously
+    try {
+      await AsyncStorage.setItem(THEME_STORAGE_KEY, newMode);
+    } catch (error) {
+      console.error('Failed to save theme preference:', error);
+    }
+  }, []);
+
+  const value = useMemo(
+    () => ({
+      mode,
+      isDark,
+      colors,
+      setTheme,
+    }),
+    [mode, isDark, colors, setTheme]
+  );
+
+  if (!isReady) {
+    return null; // or a loading screen
+  }
+
+  return <ThemeContext.Provider value={value}>{children}</ThemeContext.Provider>;
+};
+
+export const useTheme = () => {
+  const context = useContext(ThemeContext);
+  if (!context) {
+    throw new Error('useTheme must be used within ThemeProvider');
+  }
+  return context;
+};
